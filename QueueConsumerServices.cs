@@ -2,6 +2,7 @@ using System.Text.Json;
 using Amazon.SQS;
 using Amazon.SQS.Model;
 using customers_consumer.Messages;
+using MediatR;
 using Microsoft.Extensions.Options;
 
 namespace customers_consumer;
@@ -9,15 +10,20 @@ public class QueueConsumerServices : BackgroundService
 {
     private readonly IAmazonSQS _sqs;
     private readonly IOptions<QueueSettings> _queueSettings;
-    public QueueConsumerServices(IAmazonSQS sqs, IOptions<QueueSettings> queueSettings)
+    private readonly IMediator _mediator;
+    private readonly ILogger<QueueConsumerServices> _logger;
+
+    public QueueConsumerServices(IAmazonSQS sqs, IOptions<QueueSettings> queueSettings, IMediator mediator, ILogger<QueueConsumerServices> logger)
     {
         _sqs = sqs;
         _queueSettings = queueSettings;
+        _mediator = mediator;
+        _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var queueUrlResponse = await _sqs.GetQueueUrlAsync("customers", stoppingToken);
+        var queueUrlResponse = await _sqs.GetQueueUrlAsync(_queueSettings.Value.Name, stoppingToken);
         var receiveMessageRequest = new ReceiveMessageRequest
         {
             QueueUrl = queueUrlResponse.QueueUrl,
@@ -32,17 +38,21 @@ public class QueueConsumerServices : BackgroundService
             response.Messages.ForEach(async x =>
             {
                 var messageType = x.MessageAttributes["MessageType"].StringValue;
-                switch (messageType)
+
+                var type = Type.GetType($"customers_consumer.Messages.{messageType}");
+
+                if (type is null)
+                    _logger.LogWarning("Unknown message type: {MessageType}", messageType);
+
+                var typedMessage = (ISqsMessage)JsonSerializer.Deserialize(x.Body, type!)!;
+
+                try
                 {
-                    case nameof(CustomerCreated):
-                        var created = JsonSerializer.Deserialize<CustomerCreated>(x.Body);
-                        break;
-                    case nameof(CustomerUpdated):
-                        var updated = JsonSerializer.Deserialize<CustomerUpdated>(x.Body);
-                        break;
-                    case nameof(CustomerDeleted):
-                        var deleted = JsonSerializer.Deserialize<CustomerDeleted>(x.Body);
-                        break;
+                    await _mediator.Send(typedMessage, stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Message failed");
                 }
 
                 await _sqs.DeleteMessageAsync(queueUrlResponse.QueueUrl, x.ReceiptHandle, stoppingToken);

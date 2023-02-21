@@ -1,6 +1,8 @@
+using MediatR;
+
 namespace customers_consumer.Messages;
 
-public class CustomerCreated
+public class CustomerCreated : ISqsMessage
 {
     public required Guid Id { get; init; }
     public required string FullName { get; init; }
